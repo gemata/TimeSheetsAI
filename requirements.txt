@@ -1,0 +1,5 @@
+streamlit>=1.40
+anthropic>=0.40
+gspread>=6.0
+pandas>=2.0
+python-dotenv>=1.0
