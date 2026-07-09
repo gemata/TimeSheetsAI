@@ -1,0 +1,11 @@
+# Base theme for the AI Timesheet Generator (light, professional).
+[theme]
+base = "light"
+primaryColor = "#2563eb"
+backgroundColor = "#eef1f5"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#1f2733"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"

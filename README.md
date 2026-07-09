@@ -12,26 +12,37 @@ Built with **Streamlit**, the **Anthropic** SDK (two models), **gspread**, and
 ## ✨ What it does
 
 ```
-   git log            AI Model 1 (fast)         Google Sheets            AI Model 2 (smart)
+  git log (+times)    AI Model 1 (fast)         Google Sheets            AI Model 2 (smart)
  ┌──────────┐        ┌────────────────┐      ┌────────────────┐        ┌────────────────┐
- │ your      │  ───▶ │ parse commits   │ ──▶ │ Raw_Entries     │  ───▶  │ conversational  │
- │ commits   │       │ + estimate hrs  │      │ Dashboard_Summ │        │ Q&A over data   │
- │ (subproc) │       │ + weekly standup│      │ Projects_Config│        │ (chat)          │
+ │ your      │  ───▶ │ clean up msgs   │ ──▶ │ Raw_Entries     │  ───▶  │ conversational  │
+ │ commits   │       │ hours = time    │      │ Dashboard_Summ │        │ Q&A over data   │
+ │ (subproc) │       │   gaps + standup│      │ Rates_Config   │        │ (chat)          │
  └──────────┘        └────────────────┘      └────────────────┘        └────────────────┘
-     Tab 1  ──────────────────────────────────────────────▶        Tab 2
+   Generator  ────────────────────────────────────────────▶        Ask AI
 ```
 
 1. **Extract** — `subprocess` runs `git log` over your repo for the selected
-   number of days (optionally filtered by author).
-2. **Parse (Model 1, fast)** — a fast Anthropic model reads each commit and
-   returns structured JSON: date, author, ticket ID, a clean summary, estimated
-   hours, and a status.
-3. **Summarize (Model 1, fast)** — the same fast model writes a daily-standup
-   style summary and flags likely blockers for the weekly dashboard.
-4. **Store** — `gspread` writes everything into a Google Sheet with three tabs.
-   The Sheet **is** the database/API — no separate backend.
-5. **Chat (Model 2, smart)** — a smart Anthropic model reads the Sheet contents
+   number of days, **with full commit timestamps** (optionally filtered to one
+   author picked from a dropdown of the repo's authors).
+2. **Clean up (Model 1, fast)** — a fast Anthropic model rewrites each commit
+   into a clear description and infers a status. **Hours are not guessed by the
+   AI** — they are computed deterministically from the time gaps between commits
+   (see *Hours calculation* below).
+3. **Review & edit** — entries land in an **editable table** (like a spreadsheet)
+   keyed by **date-time + author**: tweak hours, change statuses, delete rows, or
+   **Recalculate Hours**. Live stat cards and a weekly summary (Days Logged /
+   Total Hours / Payable Days) update as you edit, honoring your **business rules**.
+4. **Summarize (Model 1, fast)** — the same fast model writes a daily-standup
+   style summary and flags likely blockers for the dashboard.
+5. **Export** — click **Export to Google Sheets** and `gspread` writes everything
+   into a Google Sheet with three tabs (with a styled, frozen header row). The
+   Sheet **is** the database/API — no separate backend.
+6. **Chat (Model 2, smart)** — a smart Anthropic model reads the Sheet contents
    and answers questions instantly, streaming its response into a chat UI.
+
+The interface is a polished, light-themed dashboard (stat cards, editable table,
+sidebar navigation, connection status, and quick actions) modeled on a modern
+timesheet tool. The theme lives in [`.streamlit/config.toml`](.streamlit/config.toml).
 
 ---
 
@@ -61,14 +72,19 @@ One Google Sheet with **three worksheets (tabs)**:
 
 | Worksheet | Written by | Columns |
 | --- | --- | --- |
-| `Raw_Entries` | Python (append) | `Date`, `Author`, `Ticket_ID`, `Commit_Summary`, `Hours`, `Status` |
-| `Dashboard_Summary` | Python (upsert by week) | `Week`, `Total_Hours`, `Top_Project`, `Standup_Summary`, `Blockers` |
-| `Projects_Config` | You (lookup table) | `Prefix`, `Project_Name`, `Client`, `Hourly_Rate` |
+| `Raw_Entries` | Python (append) | `Date` (date-time), `Author`, `Commit_Summary`, `Hours`, `Status` |
+| `Dashboard_Summary` | Python (upsert by week) | `Week`, `Total_Hours`, `Top_Author`, `Standup_Summary`, `Blockers` |
+| `Rates_Config` | You (lookup table) | `Author`, `Client`, `Hourly_Rate` |
 
-`Projects_Config` is seeded with example rows on first run so billing questions
-work out of the box. Edit it directly in Google Sheets to match your projects —
-the chat reads it live. Tickets are matched to projects by the text **before the
-dash** in the Ticket ID (e.g. `ABC-123` → prefix `ABC`).
+Entries are keyed by **author** (there are no ticket IDs). `Rates_Config` is an
+author rate card, seeded with example rows on first run — edit it in Google
+Sheets to match your real git authors, and the chat uses it for billing math
+(match an entry's `Author` → `Hourly_Rate`).
+
+On export, the app **styles the Sheet** for a clean look: a bold green header
+row and a frozen top row on every tab. The `Day` column you see in the app is
+**derived from the date for display only** — the stored `Raw_Entries` schema is
+exactly the five columns above, so the "database" contract stays stable.
 
 Because the data lives in Sheets, it's also your lightweight "API": any other
 tool (or teammate) can read/write the same tabs.
@@ -81,18 +97,35 @@ The app inspects your **local repository's commit history** — the commits you'
 authored and pushed. Concretely, it runs:
 
 ```bash
-git -C <repo_path> log --since="<N> days ago" --date=short \
-    --pretty=format:"%H%x1f%an%x1f%ad%x1f%s" [--author="<you>"]
+git -C <repo_path> log --since="<N> days ago" \
+    --date=format:"%Y-%m-%d %H:%M:%S" \
+    --pretty=format:"%H%x1f%an%x1f%ae%x1f%ad%x1f%s" [--author="<name>"]
 ```
 
-- `--since` limits the window to the **Days to analyze** slider value.
-- `--author` (optional) restricts results to **your** commits.
-- Each commit's hash, author, date, and subject line are extracted, then handed
-  to Model 1 for parsing and hour-estimation.
+- `--since` limits the window to the **Days to Analyze** value.
+- `--date=format:...` captures the **full commit date-time** (used for hours).
+- `--author` (optional) restricts results to one author — picked from a
+  **dropdown auto-populated with the repo's authors**.
+- Each commit's hash, author, email, date-time, and subject are extracted; the
+  message is cleaned up by Model 1 and hours are computed from timestamps.
 
 So "analyzing your pushes" = reading the commits in the repo you point it at.
-Make sure the **Repository path** in the sidebar points to a folder that is a Git
-repository (it defaults to `.`, the folder you launch the app from).
+When you set **Local repository path**, the sidebar resolves and shows the exact
+repo (name + absolute path) so you know which one you're analyzing.
+
+### ⏱️ Hours calculation
+
+Hours are derived from **commit timestamps**, per author, per day:
+
+- Commits are grouped by author and calendar day and sorted by time.
+- The **first commit of a day** is credited a 1.0h "warm-up" (work before the
+  first commit).
+- Every later commit is credited the **gap since the previous commit**, clamped
+  to `[0.25h, 4.0h]` — a gap longer than 4h is treated as a break, not work.
+- Each day's total is then **capped** by your *Cap hours per day* business rule.
+
+Click **🧮 Recalculate Hours** any time to re-run this from the current table
+(e.g. after editing the entries).
 
 ---
 
@@ -155,21 +188,42 @@ Open the URL Streamlit prints (usually <http://localhost:8501>).
 
 ## 🖥️ Using the app
 
-**Tab 1 — Timesheet & Dashboard**
-- Set **Days to analyze**, **Repository path**, and (optionally) an **author**
-  filter in the sidebar.
-- Click **🚀 Analyze Git & Update Sheets**. The app pulls commits, parses them
-  with Model 1, writes to Google Sheets, and shows the dashboard.
-- Click **📥 Load latest from Google Sheets** to re-display current stored data.
+The sidebar has two pages: **📋 Generator & Config** and **💬 Ask AI**.
 
-**Tab 2 — Ask the Data (Chat)**
-- Click **🔄 Refresh Data from Sheets** to pull the latest entries into memory
-  (also loaded automatically on your first question).
+### Sidebar — configuration & actions
+- **Repository** — analyzed automatically: the folder you launch the app from,
+  or an optional `GIT_REPO_PATH` in your `.env`. The sidebar shows the resolved
+  **repo name + absolute path** (or a warning if no repo is detected).
+- **Days to Analyze** — 7 / 14 / 30 / 60 / 90.
+- **Author to track** — a **dropdown** auto-populated with the repo's authors
+  (plus *All authors*).
+- **Business rules** (expander):
+  - *Count a day as worked* — a day counts if it has ≥ 1 commit.
+  - *Include weekends* — off by default for daily workers.
+  - *Flag short days* — days under 4h are flagged for review.
+  - *Cap hours per day* — caps a day's total (applied to the timestamp-based hours).
+- **Connected** — live Google Sheets status + **Open Google Sheet** / **Refresh Connection**.
+- **Actions** — **Download CSV** (the current table) and **Clear Chat History**.
+
+### 📋 Generator & Config
+1. Click **⚡ Generate Timesheet from Git History**. The app pulls commits and
+   Model 1 cleans them up into the editable table (hours from timestamps).
+2. Review the **stat cards** (Total Commits, Total Hours, Completed %, Contributors).
+3. **Edit** the table — change hours/status, delete rows, or click
+   **🧮 Recalculate Hours**. The weekly summary strip updates live.
+4. Click **⬆️ Export to Google Sheets** to save entries + dashboard to the Sheet.
+
+### 💬 Ask AI
+- Click **🔄 Refresh Data** to pull the latest Sheet data (also loaded
+  automatically on your first question). **Suggestion chips** offer quick starts.
 - Ask things like:
+  - *"What was the most recent commit?"* / *"What was Gemata's last commit?"*
   - *"Who worked the most hours this week?"*
-  - *"What did the team do on the API project?"*
   - *"How much do we bill Acme Corp for this week's work?"*
-- Model 2 streams the answer, reasoning over `Raw_Entries` and `Projects_Config`.
+- Model 2 streams the answer over `Raw_Entries` and `Rates_Config`. The data is
+  fed to the model **sorted newest-first with explicit date-based ordering
+  rules**, so "latest / last / most recent" questions resolve to the newest
+  commit (not the first row) — fixing the earlier ordering mix-up.
 
 ---
 
@@ -180,8 +234,9 @@ Open the URL Streamlit prints (usually <http://localhost:8501>).
 | Sidebar: *credentials.json not found* | Put the service-account JSON in this folder, named exactly `credentials.json`. |
 | Sidebar: *Sheet not found* | The Sheet title must match `GOOGLE_SHEET_NAME`, **and** be shared with the service account email. |
 | Sidebar: *ANTHROPIC_API_KEY missing* | Add the key to `.env` and restart the app. |
-| *No commits found* | Point **Repository path** at a real Git repo, widen **Days to analyze**, or clear the author filter. |
-| Git error in Tab 1 | Ensure `git` is installed and the path is a Git repository. |
+| *No commits found* | Point **Local repository path** at a real Git repo, widen **Days to Analyze**, or clear the author filter. |
+| Git error on the Generator page | Ensure `git` is installed and the path is a Git repository. |
+| Export button disabled | Google Sheets isn't configured — check the **Connected** status in the sidebar. |
 
 ---
 
@@ -197,11 +252,13 @@ you explicitly share with it.
 
 ```
 .
-├── app.py              # The entire Streamlit application
-├── requirements.txt    # Python dependencies
-├── .env.example        # Template for your environment variables
-├── .env                # Your secrets (git-ignored)
-├── credentials.json    # Google service-account key (git-ignored)
+├── app.py                 # The entire Streamlit application
+├── requirements.txt       # Python dependencies
+├── .streamlit/
+│   └── config.toml        # Light theme (colors, primary color, layout)
+├── .env.example           # Template for your environment variables
+├── .env                   # Your secrets (git-ignored)
+├── credentials.json       # Google service-account key (git-ignored)
 ├── .gitignore
 └── README.md
 ```
